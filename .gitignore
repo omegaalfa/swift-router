@@ -1,0 +1,66 @@
+# IDEs and editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Composer dependencies
+/vendor/
+
+# Composer files
+composer.lock
+
+# Logs and cache
+*.log
+cache/
+tmp/
+temp/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Arquivos de configuração de ambiente
+.env
+.env.local
+.env.*.local
+
+# PHPUnit
+/phpunit.xml
+/phpunit.xml.dist
+/tests/_output/
+
+# Arquivos gerados
+autoload.php
+autoload.php.dist
+dump-autoload.php
+
+# Arquivos de build / artefatos
+build/
+dist/
+*.phar
+
+# Arquivos específicos de WSL
+*/lost+found/
+
+# Arquivos de cobertura de testes
+coverage/
+*.cov
+*.lcov
+
+# Arquivos de IDE para PHPStan/Psalm
+/.phpstan/
+/.psalm/
+
+# Arquivos de lock de outros gerenciadores (se houver)
+./composer.lock
+package-lock.json
+yarn.lock
+
+# Arquivos específicos de Docker
+docker-compose.override.yml
+.env.docker
+
+# Outros temporários
+*.swp
+*~
