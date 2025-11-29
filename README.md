@@ -1,4 +1,4 @@
-# 🔗 Guia Completo - TreeRouter
+# 🔗 Guia Completo - SwiftRouter
 
 ## 📚 Índice
 
@@ -119,7 +119,7 @@ $router->group('/users/:userId', function($router) {
 ### 5. API REST Completa com Grupos
 
 ```php
-$router = new TreeRouter();
+$router = new SwiftRouter();
 
 // Middlewares globais
 $router->use(new JsonMiddleware());
@@ -806,7 +806,7 @@ Request → MW1 → MW2 → MW3 → MW4 → MW5 → Handler → MW5 → MW4 → 
 ### API com Autenticação
 
 ```php
-$router = new TreeRouter();
+$router = new SwiftRouter();
 
 // Middlewares globais
 $router
