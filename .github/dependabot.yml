@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "omegaalfa"
+    labels:
+      - "github-actions"
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    rebase-strategy: "auto"
+
+  - package-ecosystem: "composer"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "omegaalfa"
+    labels:
+      - "composer"
+      - "dependencies"
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "example-package"
+        versions: ["1.x"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    rebase-strategy: "auto"

@@ -5,7 +5,7 @@
   "description": "This library implements the Trie routing logic",
   "keywords": [
     "router", "routes", "routeTree", "TreeRoute", "NodeRoute",
-    "Prefix Trees", "PSR", "PSR-7", "PSR-15", "HTTP",
+    "Prefix Trees", "PSR", "PSR-7", "PSR-15", "HTTP","group router",
     "message", "requests", "response", "middleware",
     "Laminas", "Diactoros", "php8"
   ],

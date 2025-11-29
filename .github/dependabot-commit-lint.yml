@@ -1,0 +1,21 @@
+name: Dependabot Commit Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+    branches: [main, master]
+
+jobs:
+  lint:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check conventional commit style
+        run: |
+          TITLE=$(jq -r .pull_request.title "$GITHUB_EVENT_PATH")
+          if [[ ! "$TITLE" =~ ^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert|merge|wip)\: ]]; then
+            echo "❌ Title does not follow Conventional Commits:"
+            echo "$TITLE"
+            exit 1
+          fi
+          echo "✅ Conventional commit OK"
