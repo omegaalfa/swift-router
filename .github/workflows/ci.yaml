@@ -13,6 +13,7 @@ jobs:
       matrix:
         php: [ "8.4" ]
     name: ⚙️ Running test for PHP ${{ matrix.php }}
+
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v6
@@ -25,6 +26,7 @@ jobs:
           git fetch --prune
           LAST_COMMIT=$(git rev-parse "${{ github.event.before }}" 2>/dev/null || git rev-parse HEAD~1)
           CURRENT_COMMIT=$(git rev-parse HEAD)
+
           echo "LAST_COMMIT=$LAST_COMMIT" >> $GITHUB_ENV
           echo "CURRENT_COMMIT=$CURRENT_COMMIT" >> $GITHUB_ENV
           echo "Debug: Commit range $LAST_COMMIT..$CURRENT_COMMIT"
@@ -36,27 +38,33 @@ jobs:
           echo "Debug: Commits in range:"
           echo "$COMMITS"
 
-          # Filtra Conventional Commits
-          CONVENTIONAL=$(echo "$COMMITS" | grep -E '^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert|merge|wip): ' || true)
+          # Remove merge commits
+          COMMITS_FILTERED=$(echo "$COMMITS" | grep -vE '^Merge ' || true)
 
-          echo "Debug: Conventional found:"
+          echo "Debug: After filtering merges:"
+          echo "$COMMITS_FILTERED"
+
+          # Valida Conventional Commits corretamente
+          CONVENTIONAL=$(echo "$COMMITS_FILTERED" | grep -E '^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert|wip)(\(.+\))?: ' || true)
+
+          echo "Debug: Conventional commits found:"
           echo "$CONVENTIONAL"
 
-          # Exporta corretamente
           {
             echo "stdout<<EOF"
             echo "$CONVENTIONAL"
             echo "EOF"
           } >> $GITHUB_OUTPUT
-      
 
       - name: Verify commit messages
         run: |
           echo "Debug: Commit check output: '${{ steps.commit-check.outputs.stdout }}'"
+
           if [ -n "${{ steps.commit-check.outputs.stdout }}" ]; then
             echo "Commit messages follow Conventional Commits."
           else
             echo "Some commit messages do not follow Conventional Commits."
+            echo "Commits analyzed:"
             git log --format='%s' "${LAST_COMMIT}..${CURRENT_COMMIT}"
             exit 1
           fi
@@ -90,4 +98,4 @@ jobs:
         run: vendor/bin/phpunit --coverage-text --coverage-clover=coverage.xml
 
       - name: 🔎 Run static analysis
-        run: vendor/bin/phpstan analyse --level=4 src
+        run: vendor/bin/phpstan analyse --level=6 src
