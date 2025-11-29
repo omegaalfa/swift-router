@@ -1,4 +1,4 @@
-# 🔗 Guia Completo de Middlewares - TreeRouter
+# 🔗 Guia Completo - TreeRouter
 
 ## 📚 Índice
 
@@ -7,7 +7,335 @@
 3. [Tipos de Middlewares](#tipos-de-middlewares)
 4. [Criando Middlewares](#criando-middlewares)
 5. [Exemplos Práticos](#exemplos-práticos)
-6. [Boas Práticas](#boas-práticas)
+6. [Route Groups](#route-groups)
+7. [Boas Práticas](#boas-práticas)
+
+---
+
+## Route Groups
+
+### O que são Route Groups?
+
+Route Groups permitem **agrupar rotas com prefixos e middlewares compartilhados**, evitando repetição e facilitando organização.
+
+---
+
+### Sintaxe Básica
+
+```php
+$router->group('/prefixo', function($router) {
+    // Rotas dentro do grupo
+    $router->get('/users', $handler);
+}, [$middleware1, $middleware2]);
+```
+
+---
+
+### 1. Grupo Simples com Prefixo
+
+```php
+$router->group('/api', function($router) {
+    $router->get('/users', $handler);    // GET /api/users
+    $router->get('/posts', $handler);    // GET /api/posts
+    $router->post('/users', $handler);   // POST /api/users
+});
+```
+
+**Resultado:**
+- `/api/users` (GET e POST)
+- `/api/posts` (GET)
+
+---
+
+### 2. Grupo com Middlewares
+
+```php
+$router->group('/admin', function($router) {
+    $router->get('/dashboard', $dashboardHandler);
+    $router->get('/users', $usersHandler);
+    $router->post('/settings', $settingsHandler);
+}, [new AuthMiddleware(), new AdminMiddleware()]);
+```
+
+**Comportamento:**
+- Todos os handlers dentro do grupo passam pelos middlewares `AuthMiddleware` e `AdminMiddleware`
+- Ideal para proteger áreas administrativas
+
+---
+
+### 3. Grupos Aninhados (Versionamento de API)
+
+```php
+$router->group('/api', function($router) {
+    
+    // API v1
+    $router->group('/v1', function($router) {
+        $router->get('/users', $v1UsersHandler);      // /api/v1/users
+        $router->get('/posts', $v1PostsHandler);      // /api/v1/posts
+    });
+    
+    // API v2
+    $router->group('/v2', function($router) {
+        $router->get('/users', $v2UsersHandler);      // /api/v2/users
+        $router->get('/posts', $v2PostsHandler);      // /api/v2/posts
+    });
+});
+```
+
+**Uso comum:** Versionamento de APIs, multi-idioma, multi-tenancy
+
+---
+
+### 4. Grupos com Parâmetros Dinâmicos
+
+```php
+$router->group('/users/:userId', function($router) {
+    
+    $router->get('/profile', function($ctx, $res) {
+        $userId = $ctx->params['userId'];
+        return $res->withBody("Profile of user {$userId}");
+    });
+    
+    $router->get('/posts', function($ctx, $res) {
+        $userId = $ctx->params['userId'];
+        return $res->withBody("Posts of user {$userId}");
+    });
+    
+    $router->get('/posts/:postId', function($ctx, $res) {
+        $userId = $ctx->params['userId'];
+        $postId = $ctx->params['postId'];
+        return $res->withBody("User {$userId}, Post {$postId}");
+    });
+});
+```
+
+**Resultado:**
+- `/users/123/profile` → `userId = 123`
+- `/users/123/posts` → `userId = 123`
+- `/users/123/posts/456` → `userId = 123`, `postId = 456`
+
+---
+
+### 5. API REST Completa com Grupos
+
+```php
+$router = new TreeRouter();
+
+// Middlewares globais
+$router->use(new JsonMiddleware());
+
+$router->group('/api/v1', function($router) {
+    
+    // Public endpoints
+    $router->get('/status', function($ctx, $res) {
+        return $res->withBody(['status' => 'online']);
+    });
+    
+    // Protected endpoints
+    $router->group('/users', function($router) {
+        $router->get('/', $listUsersHandler);           // GET /api/v1/users
+        $router->post('/', $createUserHandler);         // POST /api/v1/users
+        $router->get('/:id', $showUserHandler);         // GET /api/v1/users/123
+        $router->put('/:id', $updateUserHandler);       // PUT /api/v1/users/123
+        $router->delete('/:id', $deleteUserHandler);    // DELETE /api/v1/users/123
+    }, [new AuthMiddleware()]);
+    
+    $router->group('/posts', function($router) {
+        $router->get('/', $listPostsHandler);           // GET /api/v1/posts
+        $router->get('/:id', $showPostHandler);         // GET /api/v1/posts/456
+    }, [new AuthMiddleware()]);
+});
+```
+
+---
+
+### 6. Hierarquia de Middlewares em Grupos
+
+Os middlewares são executados na seguinte ordem:
+
+1. **Middlewares Globais** (`$router->use()`)
+2. **Middlewares do Grupo Pai**
+3. **Middlewares do Grupo Filho**
+4. **Middlewares da Rota**
+
+**Exemplo:**
+
+```php
+$router->use(new GlobalMiddleware());
+
+$router->group('/api', function($router) {
+    
+    $router->group('/admin', function($router) {
+        
+        $router->get('/users', $handler, [new RouteMiddleware()]);
+        
+    }, [new AdminMiddleware()]);
+    
+}, [new ApiAuthMiddleware()]);
+```
+
+**Ordem de execução para `GET /api/admin/users`:**
+
+```
+Request
+  ↓
+GlobalMiddleware
+  ↓
+ApiAuthMiddleware (grupo /api)
+  ↓
+AdminMiddleware (grupo /admin)
+  ↓
+RouteMiddleware (rota específica)
+  ↓
+Handler
+  ↓
+Response
+```
+
+---
+
+### 7. Organização por Domínio/Área
+
+```php
+// Website público
+$router->group('/web', function($router) {
+    $router->get('/', $homeHandler);
+    $router->get('/about', $aboutHandler);
+    $router->get('/contact', $contactHandler);
+});
+
+// Painel administrativo
+$router->group('/admin', function($router) {
+    $router->get('/dashboard', $dashboardHandler);
+    
+    $router->group('/users', function($router) {
+        $router->get('/', $listUsersHandler);
+        $router->post('/', $createUserHandler);
+    });
+    
+    $router->group('/settings', function($router) {
+        $router->get('/general', $generalHandler);
+        $router->get('/security', $securityHandler);
+    });
+}, [new AuthMiddleware(), new AdminMiddleware()]);
+
+// API
+$router->group('/api', function($router) {
+    $router->get('/health', $healthHandler);
+    $router->get('/metrics', $metricsHandler);
+}, [new ApiAuthMiddleware()]);
+```
+
+---
+
+### Boas Práticas com Grupos
+
+#### ✅ DO
+
+1. **Use grupos para organizar rotas relacionadas**
+   ```php
+   $router->group('/blog', function($router) {
+       $router->get('/', $listPostsHandler);
+       $router->get('/:slug', $showPostHandler);
+   });
+   ```
+
+2. **Aplique middlewares comuns no grupo**
+   ```php
+   $router->group('/admin', function($router) {
+       // Todas exigem autenticação
+   }, [new AuthMiddleware(), new AdminMiddleware()]);
+   ```
+
+3. **Use para versionamento de API**
+   ```php
+   $router->group('/api/v1', function($router) { /* ... */ });
+   $router->group('/api/v2', function($router) { /* ... */ });
+   ```
+
+4. **Grupos aninhados para hierarquia clara**
+   ```php
+   $router->group('/api', function($router) {
+       $router->group('/v1', function($router) {
+           $router->group('/users', function($router) {
+               // /api/v1/users/*
+           });
+       });
+   });
+   ```
+
+#### ❌ DON'T
+
+1. **Não crie grupos muito profundos**
+   ```php
+   // ❌ Difícil de manter (mais de 3 níveis)
+   $router->group('/a', fn($r) =>
+       $r->group('/b', fn($r) =>
+           $r->group('/c', fn($r) =>
+               $r->group('/d', fn($r) => /* ... */)
+           )
+       )
+   );
+   ```
+
+2. **Não repita prefixos manualmente**
+   ```php
+   // ❌ Redundante
+   $router->group('/api', function($router) {
+       $router->get('/api/users', $handler);  // /api/api/users
+   });
+   
+   // ✅ Correto
+   $router->group('/api', function($router) {
+       $router->get('/users', $handler);      // /api/users
+   });
+   ```
+
+3. **Não abuse de middlewares**
+   ```php
+   // ❌ Muitos middlewares = performance ruim
+   $router->group('/api', function($router) {
+       // ...
+   }, [$mw1, $mw2, $mw3, $mw4, $mw5, $mw6]);
+   ```
+
+---
+
+### Casos de Uso Reais
+
+#### Multi-tenancy
+
+```php
+$router->group('/tenant/:tenantId', function($router) {
+    $router->get('/dashboard', $dashboardHandler);
+    $router->get('/users', $usersHandler);
+    $router->get('/reports', $reportsHandler);
+}, [new TenantMiddleware()]);
+```
+
+#### Internacionalização
+
+```php
+$router->group('/:locale', function($router) {
+    $router->get('/', $homeHandler);
+    $router->get('/about', $aboutHandler);
+    $router->get('/products', $productsHandler);
+}, [new LocaleMiddleware()]);
+
+// /en/, /pt/, /es/, etc
+```
+
+#### Subdomain-like Routing
+
+```php
+$router->group('/api', function($router) {
+    $router->get('/users', $usersHandler);
+}, [new ApiMiddleware()]);
+
+$router->group('/app', function($router) {
+    $router->get('/dashboard', $dashboardHandler);
+}, [new AppMiddleware()]);
+```
 
 ---
 
@@ -400,10 +728,10 @@ class JsonMiddleware implements MiddlewareInterface
 ### ✅ DO
 
 1. **Use middlewares para preocupações transversais**
-    - Logging, auth, CORS, cache, validação
+   - Logging, auth, CORS, cache, validação
 
 2. **Mantenha middlewares simples e focados**
-    - Um middleware = uma responsabilidade
+   - Um middleware = uma responsabilidade
 
 3. **Use o contexto para compartilhar dados**
    ```php
@@ -426,10 +754,10 @@ class JsonMiddleware implements MiddlewareInterface
 ### ❌ DON'T
 
 1. **Não modifique estado global**
-    - Use o contexto ao invés de variáveis globais
+   - Use o contexto ao invés de variáveis globais
 
 2. **Não faça operações pesadas em middlewares**
-    - Mantenha-os rápidos
+   - Mantenha-os rápidos
 
 3. **Não esqueça de chamar $next()**
    ```php
@@ -446,7 +774,7 @@ class JsonMiddleware implements MiddlewareInterface
    ```
 
 4. **Não acople middlewares entre si**
-    - Cada um deve ser independente
+   - Cada um deve ser independente
 
 ---
 
@@ -497,9 +825,5 @@ $router->get('/users', $usersHandler, [$auth]);
 $router->post('/posts', $createPostHandler, [$auth, new ValidationMiddleware(['title' => 'required'])]);
 ```
 
-Execute os exemplos:
-```bash
-php example_middlewares.php
-```
 
-🎉 **Middlewares totalmente funcionais!**
+🎉 **Middlewares e Route Groups totalmente funcionais!**

@@ -29,4 +29,9 @@ class TreeNode
 
     /**@var mixed|null */
     public mixed $handler = null;
+
+
+    public ?string $routeName = null;
+
+    public array $constraints = [];
 }

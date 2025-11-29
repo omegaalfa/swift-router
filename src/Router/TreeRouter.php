@@ -11,6 +11,9 @@ use RuntimeException;
 
 class TreeRouter
 {
+    /**
+     * @var TreeNode
+     */
     protected TreeNode $root;
 
     /** @var array<string, array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}> */
@@ -19,6 +22,15 @@ class TreeRouter
     /** @var array<string, array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}> */
     private array $routeCache = [];
 
+    /** @var string Prefixo atual do grupo */
+    private string $groupPrefix = '';
+
+    /** @var array<MiddlewareInterface> Middlewares do grupo atual */
+    private array $groupMiddlewares = [];
+
+    /**
+     * @var int
+     */
     private int $cacheLimit = 2048;
 
     /** @var array<MiddlewareInterface> Middlewares globais */
@@ -53,6 +65,36 @@ class TreeRouter
         return $this;
     }
 
+    /**
+     * Cria um grupo de rotas com prefixo e middlewares compartilhados
+     *
+     * @param string $prefix Prefixo do grupo (/api, /admin, etc)
+     * @param callable $callback Callback que recebe o router
+     * @param array $middlewares Middlewares aplicados a todas as rotas do grupo
+     *
+     * @example
+     * $router->group('/api/v1', function($router) {
+     *     $router->get('/users', $handler);      // /api/v1/users
+     *     $router->post('/users', $handler);     // /api/v1/users
+     * }, [new AuthMiddleware()]);
+     */
+    public function group(string $prefix, callable $callback, array $middlewares = []): void
+    {
+        // Salva estado anterior
+        $previousPrefix = $this->groupPrefix;
+        $previousMiddlewares = $this->groupMiddlewares;
+
+        // Aplica novo estado
+        $this->groupPrefix = $this->buildGroupPath($prefix);
+        $this->groupMiddlewares = array_merge($this->groupMiddlewares, $middlewares);
+
+        // Executa callback com o router
+        $callback($this);
+
+        // Restaura estado anterior (permite grupos aninhados)
+        $this->groupPrefix = $previousPrefix;
+        $this->groupMiddlewares = $previousMiddlewares;
+    }
 
     /**
      * Adiciona uma rota
@@ -67,17 +109,23 @@ class TreeRouter
         // Normaliza o método
         $method = strtoupper($method);
 
+        // Aplica prefixo do grupo se existir
+        $fullPath = $this->groupPrefix ? $this->buildGroupPath($path) : $path;
+
+        // Combina middlewares do grupo com os da rota
+        $allMiddlewares = array_merge($this->groupMiddlewares, $middlewares);
+
         // Adiciona método ao caminho para evitar conflitos
-        $fullPath = $method . '::' . $path;
+        $routePath = $method . '::' . $fullPath;
 
         // normalize without excessive trimming
-        $p = ltrim($fullPath, '/');
+        $p = ltrim($routePath, '/');
 
         // register static fast-path
         if (!str_contains($p, ':')) {
             $this->staticMap['/' . $p] = [
                 'handler' => $handler,
-                'middlewares' => $middlewares,
+                'middlewares' => $allMiddlewares,
                 'params' => [],
             ];
         }
@@ -109,8 +157,32 @@ class TreeRouter
 
         $currentNode->isEndOfRoute = true;
         $currentNode->handler = $handler;
-        $currentNode->middlewares = $middlewares;
+        $currentNode->middlewares = $allMiddlewares;
     }
+
+
+    /**
+     * Constrói o caminho completo considerando o prefixo do grupo
+     *
+     * @param string $path Caminho da rota
+     * @return string Caminho completo com prefixo
+     */
+    private function buildGroupPath(string $path): string
+    {
+        $prefix = trim($this->groupPrefix, '/');
+        $path = trim($path, '/');
+
+        if ($prefix === '') {
+            return '/' . $path;
+        }
+
+        if ($path === '') {
+            return '/' . $prefix;
+        }
+
+        return '/' . $prefix . '/' . $path;
+    }
+
 
     /**
      * Busca e executa uma rota com middlewares
@@ -274,6 +346,7 @@ class TreeRouter
             'static_routes' => count($this->staticMap),
             'cached_routes' => count($this->routeCache),
             'cache_limit' => $this->cacheLimit,
+            'global_middlewares' => count($this->globalMiddlewares),
         ];
     }
 
