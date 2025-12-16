@@ -105,14 +105,36 @@ class TreeRouter
     }
 
     /**
+     * Constrói o caminho completo considerando o prefixo do grupo
+     *
+     * @param string $path Caminho da rota
+     * @return string Caminho completo com prefixo
+     */
+    private function buildGroupPath(string $path): string
+    {
+        $prefix = trim($this->groupPrefix, '/');
+        $path = trim($path, '/');
+
+        if ($prefix === '') {
+            return '/' . $path;
+        }
+
+        if ($path === '') {
+            return '/' . $prefix;
+        }
+
+        return '/' . $prefix . '/' . $path;
+    }
+
+    /**
      * Adiciona uma rota
      *
      * @param string $method Método HTTP (GET, POST, PUT, DELETE, etc)
      * @param string $path Padrão da rota (/users/:id)
-     * @param callable $handler Handler da rota
+     * @param callable|array<string, string> $handler Handler da rota
      * @param array<int, MiddlewareInterface> $middlewares Middlewares opcionais
      */
-    public function addRoute(string $method, string $path, callable $handler, array $middlewares = []): void
+    public function addRoute(string $method, string $path, callable|array $handler, array $middlewares = []): void
     {
         // Normaliza o método
         $method = strtoupper($method);
@@ -128,6 +150,10 @@ class TreeRouter
 
         // normalize without excessive trimming
         $p = ltrim($routePath, '/');
+
+        if (is_array($handler)) {
+            $handler = $this->normalizeArrayHandler($handler);
+        }
 
         // register static fast-path (only quando o caminho não tem parâmetros)
         if (!str_contains($fullPath, ':')) {
@@ -168,29 +194,38 @@ class TreeRouter
         $currentNode->middlewares = $allMiddlewares;
     }
 
-
     /**
-     * Constrói o caminho completo considerando o prefixo do grupo
-     *
-     * @param string $path Caminho da rota
-     * @return string Caminho completo com prefixo
+     * @param array<string, string> $handler
+     * @return callable
      */
-    private function buildGroupPath(string $path): string
+    protected function normalizeArrayHandler(array $handler): callable
     {
-        $prefix = trim($this->groupPrefix, '/');
-        $path = trim($path, '/');
-
-        if ($prefix === '') {
-            return '/' . $path;
+        if (count($handler) !== 2) {
+            throw new \InvalidArgumentException(
+                'Array handler must be [ControllerClass, method]'
+            );
         }
 
-        if ($path === '') {
-            return '/' . $prefix;
+        [$controller, $method] = $handler;
+
+        if (!is_string($controller) || !is_string($method)) {
+            throw new \InvalidArgumentException(
+                'Invalid array handler format'
+            );
         }
 
-        return '/' . $prefix . '/' . $path;
+        return function (...$args) use ($controller, $method) {
+            $instance = new $controller();
+
+            if (!method_exists($instance, $method)) {
+                throw new \RuntimeException(
+                    "Method {$method} does not exist on {$controller}"
+                );
+            }
+
+            return $instance->$method(...$args);
+        };
     }
-
 
     /**
      * Busca e executa uma rota com middlewares
@@ -363,6 +398,8 @@ class TreeRouter
 
     /**
      * Limpa o cache de rotas
+     *
+     * @return void
      */
     public function clearCache(): void
     {
@@ -371,6 +408,9 @@ class TreeRouter
 
     /**
      * Define o limite do cache
+     *
+     * @param int $limit
+     * @return void
      */
     public function setCacheLimit(int $limit): void
     {

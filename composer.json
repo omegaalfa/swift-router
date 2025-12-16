@@ -38,6 +38,7 @@
     "infection/infection": "dev-master"
   },
   "scripts": {
+    "serve": "php -S localhost:9000 index.php",
     "test": "phpunit",
     "phpstan": "phpstan analyse src --level=6"
   },
