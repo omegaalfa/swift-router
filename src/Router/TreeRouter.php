@@ -38,12 +38,14 @@ class TreeRouter
     /** @var array<MiddlewareInterface> Middlewares globais */
     private array $globalMiddlewares = [];
 
+
     /** @var int Tamanho máximo de parâmetro de rota */
     private int $maxParamLength = 255;
 
     /** @var array<string> Namespaces permitidos para controllers */
     private array $allowedNamespaces = [];
 
+    /** @param array<int, string> $allowedNamespaces */
     public function __construct(array $allowedNamespaces = [])
     {
         $this->root = new TreeNode();
@@ -145,6 +147,10 @@ class TreeRouter
      */
     public function addRoute(string $method, string $path, callable|array $handler, array $middlewares = []): void
     {
+        // Registration can change both precedence and the selected handler.
+        // Previously cached dynamic matches must not outlive the route table.
+        $this->routeCache = [];
+
         // Valida e normaliza o método
         $method = HttpMethod::fromString($method)->value;
 
@@ -192,40 +198,13 @@ class TreeRouter
                 continue;
             }
 
-            if (!isset($currentNode->children[$segment])) {
-                $currentNode->children[$segment] = new TreeNode();
-            }
-
+            $currentNode->children[$segment] ??= new TreeNode();
             $currentNode = $currentNode->children[$segment];
         }
 
         $currentNode->isEndOfRoute = true;
         $currentNode->handler = $handler;
         $currentNode->middlewares = $allMiddlewares;
-    }
-
-    /**
-     * Normaliza e valida o path da rota
-     *
-     * @param string $path
-     * @return string
-     * @throws InvalidArgumentException
-     */
-    private function normalizePath(string $path): string
-    {
-        // Remove slashes duplicados
-        $path = preg_replace('#/+#', '/', $path);
-
-        // Remove trailing slash (exceto root)
-        $path = $path !== '/' ? rtrim($path, '/') : '/';
-
-        // Detecta path traversal
-        $decoded = urldecode($path);
-        if (str_contains($decoded, '..') || str_contains($decoded, '\\')) {
-            throw new InvalidArgumentException('Path traversal detected in route: ' . $path);
-        }
-
-        return $path;
     }
 
     /**
@@ -253,15 +232,11 @@ class TreeRouter
             }
         }
 
-        if (!is_callable($handler)) {
-            throw new InvalidArgumentException('Handler must be callable');
-        }
-
         return $handler;
     }
 
     /**
-     * @param array<string, string> $handler
+     * @param array<int|string, mixed> $handler
      * @return callable
      */
     protected function normalizeArrayHandler(array $handler): callable
@@ -272,7 +247,8 @@ class TreeRouter
             );
         }
 
-        [$controller, $method] = $handler;
+        $values = array_values($handler);
+        [$controller, $method] = $values;
 
         if (!is_string($controller) || !is_string($method)) {
             throw new InvalidArgumentException(
@@ -319,6 +295,30 @@ class TreeRouter
     }
 
     /**
+     * Normaliza e valida o path da rota
+     *
+     * @param string $path
+     * @return string
+     * @throws InvalidArgumentException
+     */
+    private function normalizePath(string $path): string
+    {
+        // Remove slashes duplicados
+        $path = preg_replace('#/+#', '/', $path);
+
+        // Remove trailing slash (exceto root)
+        $path = $path !== '/' ? rtrim($path, '/') : '/';
+
+        // Detecta path traversal
+        $decoded = urldecode($path);
+        if (str_contains($decoded, '..') || str_contains($decoded, '\\')) {
+            throw new InvalidArgumentException('Path traversal detected in route: ' . $path);
+        }
+
+        return $path;
+    }
+
+    /**
      * Busca e executa uma rota com middlewares
      *
      * @param string $method Método HTTP
@@ -337,7 +337,7 @@ class TreeRouter
         // Tratar HEAD como GET
         $searchMethod = $originalMethod === 'HEAD' ? 'GET' : $originalMethod;
 
-        $route = $this->findRoute($searchMethod, $path);
+        $route = $this->findRouteInternal($searchMethod, $path);
 
         // Se não encontrou e é OPTIONS, retorna lista de métodos permitidos
         if ($route === null && $originalMethod === 'OPTIONS') {
@@ -357,26 +357,19 @@ class TreeRouter
         // Cria a cadeia de execução (middlewares + handler)
         $handler = $route['handler'];
 
-
         // Constrói a cadeia de middlewares (de trás para frente)
         $chain = static function (RequestContext $ctx) use ($handler): Response {
             $result = $handler($ctx, new Response());
-
-            // Se handler retornar Response, usa ela
             if ($result instanceof Response) {
                 return $result;
             }
-
-            // Caso contrário, cria Response com o resultado
             return new Response($result);
         };
 
-        // Encadeia middlewares em ordem reversa
         foreach (array_reverse($allMiddlewares) as $middleware) {
             $chain = $this->wrapMiddleware($middleware, $chain);
         }
 
-        // Executa a cadeia
         $response = $chain($context);
 
         // Se era HEAD, remove o body
@@ -385,6 +378,119 @@ class TreeRouter
         }
 
         return $response;
+    }
+
+    /**
+     * Busca uma rota sem executar
+     *
+     * @param string $method Método HTTP
+     * @param string $path Caminho da requisição
+     * @return array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}|null
+     */
+    public function findRoute(string $method, string $path): ?array
+    {
+        // Valida e normaliza o método
+        $method = HttpMethod::fromString($method)->value;
+
+        return $this->findRouteInternal($method, $path);
+    }
+
+    /**
+     * Internal matcher for dispatch, which already has a normalized method.
+     *
+     * @param string $method
+     * @param string $path
+     * @return array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}|null
+     */
+    private function findRouteInternal(string $method, string $path): ?array
+    {
+
+        // Normaliza o path usando o mesmo método de addRoute
+        $normalizedPath = $this->normalizePath($path);
+
+        // Adiciona método ao caminho
+        $fullPath = $method . '::' . $normalizedPath;
+
+        // normalize incoming path
+        $normalized = '/' . ltrim($fullPath, '/');
+
+        // static fast map
+        if (isset($this->staticMap[$normalized])) {
+            return $this->staticMap[$normalized];
+        }
+
+        // cache
+        if (isset($this->routeCache[$normalized])) {
+            $entry = $this->routeCache[$normalized];
+            unset($this->routeCache[$normalized]);
+            $this->routeCache[$normalized] = $entry;
+            return $entry;
+        }
+
+        $p = ltrim($normalized, '/');
+        $parts = $p === '' ? [] : explode('/', $p);
+        $result = $this->matchNode($this->root, $parts, 0, []);
+
+        if ($result !== null) {
+
+            // store in cache
+            $this->routeCache[$normalized] = $result;
+            if (count($this->routeCache) > $this->cacheLimit) {
+                reset($this->routeCache);
+                /** @var string|null $k */
+                $k = key($this->routeCache);
+                if ($k !== null) {
+                    unset($this->routeCache[$k]);
+                }
+            }
+
+            return $result;
+        }
+
+        return null;
+    }
+
+    /**
+     * Match exact children before parameter children, falling back when an
+     * exact branch does not lead to a complete route.
+     *
+     * @param list<string> $parts
+     * @param array<string, string> $params
+     * @return array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}|null
+     */
+    private function matchNode(TreeNode $node, array $parts, int $index, array $params): ?array
+    {
+        if ($index === count($parts)) {
+            if ($node->isEndOfRoute && $node->handler !== null) {
+                return [
+                    'handler' => $node->handler,
+                    'middlewares' => $node->middlewares,
+                    'params' => $params,
+                ];
+            }
+
+            return null;
+        }
+
+        $segment = $parts[$index];
+        if (isset($node->children[$segment])) {
+            $result = $this->matchNode($node->children[$segment], $parts, $index + 1, $params);
+            if ($result !== null) {
+                return $result;
+            }
+        }
+
+        if ($node->paramChild === null) {
+            return null;
+        }
+        if (strlen($segment) > $this->maxParamLength) {
+            throw new RuntimeException(
+                "Route parameter exceeds maximum length of {$this->maxParamLength} characters",
+            );
+        }
+
+        $params[$node->paramName ?? 'param'] = $segment;
+        return $this->matchNode($node->paramChild, $parts, $index + 1, $params);
     }
 
     /**
@@ -412,98 +518,6 @@ class TreeRouter
         return (new Response())
             ->withHeader('Allow', implode(', ', array_unique($methods)))
             ->withStatus(204);
-    }
-
-    /**
-     * Busca uma rota sem executar
-     *
-     * @param string $method Método HTTP
-     * @param string $path Caminho da requisição
-     * @return array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>}|null
-     */
-    public function findRoute(string $method, string $path): ?array
-    {
-        // Valida e normaliza o método
-        $method = HttpMethod::fromString($method)->value;
-
-        // Normaliza o path usando o mesmo método de addRoute
-        $normalizedPath = $this->normalizePath($path);
-
-        // Adiciona método ao caminho
-        $fullPath = $method . '::' . $normalizedPath;
-
-        // normalize incoming path
-        $normalized = '/' . ltrim($fullPath, '/');
-
-        // static fast map
-        if (isset($this->staticMap[$normalized])) {
-            return $this->staticMap[$normalized];
-        }
-
-        // cache
-        if (isset($this->routeCache[$normalized])) {
-            $entry = $this->routeCache[$normalized];
-            unset($this->routeCache[$normalized]);
-            $this->routeCache[$normalized] = $entry;
-            return $entry;
-        }
-
-        $currentNode = $this->root;
-        $p = ltrim($normalized, '/');
-        $parts = $p === '' ? [] : explode('/', $p);
-        $params = [];
-
-        foreach ($parts as $segment) {
-            if ($segment === '') {
-                continue;
-            }
-
-            // 1 — exact child
-            if (isset($currentNode->children[$segment])) {
-                $currentNode = $currentNode->children[$segment];
-                continue;
-            }
-
-            // 2 — param child
-            if ($currentNode->paramChild !== null) {
-                // Valida tamanho do parâmetro para prevenir DoS
-                if (strlen($segment) > $this->maxParamLength) {
-                    throw new RuntimeException(
-                        "Route parameter exceeds maximum length of {$this->maxParamLength} characters"
-                    );
-                }
-
-                $params[$currentNode->paramName ?? 'param'] = $segment;
-                $currentNode = $currentNode->paramChild;
-                continue;
-            }
-
-            // 3 — no match
-            return null;
-        }
-
-        if ($currentNode->isEndOfRoute && $currentNode->handler !== null) {
-            $result = [
-                'handler' => $currentNode->handler,
-                'middlewares' => $currentNode->middlewares,
-                'params' => $params,
-            ];
-
-            // store in cache
-            $this->routeCache[$normalized] = $result;
-            if (count($this->routeCache) > $this->cacheLimit) {
-                reset($this->routeCache);
-                /** @var string|null $k */
-                $k = key($this->routeCache);
-                if ($k !== null) {
-                    unset($this->routeCache[$k]);
-                }
-            }
-
-            return $result;
-        }
-
-        return null;
     }
 
     /**

@@ -121,6 +121,42 @@ final class SecurityTest extends TestCase
         $this->assertEquals('users', $response3->body);
     }
 
+    public function testNormalizePathContractCases(): void
+    {
+        $router = new SwiftRouter();
+        $method = new \ReflectionMethod($router, 'normalizePath');
+        $method->setAccessible(true);
+
+        foreach ([
+            '/' => '/', '/users' => '/users', '/users/' => '/users',
+            '//users' => '/users', '/users//123' => '/users/123',
+            '/users/%2F' => '/users/%2F', '/users/%2E' => '/users/%2E',
+            '/users/%252e%252e' => '/users/%252e%252e', '' => '',
+        ] as $input => $expected) {
+            $this->assertSame($expected, $method->invoke($router, $input), $input);
+        }
+
+        foreach (['/../admin', '/users/%2e%2e/admin', '/users/%2E%2E/admin', '/users/..%2Fadmin', '/users/\\admin'] as $input) {
+            try {
+                $method->invoke($router, $input);
+                $this->fail('Expected traversal rejection for '.$input);
+            } catch (\InvalidArgumentException $exception) {
+                $this->assertStringContainsString('Path traversal detected', $exception->getMessage());
+            }
+        }
+    }
+
+    public function testEncodedParameterIsMatchedAndEncodedTraversalIsRejected(): void
+    {
+        $router = new SwiftRouter();
+        $router->get('/users/:id', fn (RequestContext $context) => $context->params['id']);
+
+        $this->assertSame('a%20b', $router->dispatch('GET', '/users/a%20b')->body);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $router->dispatch('GET', '/users/%2e%2e/admin');
+    }
+
     /**
      * Testa limite de tamanho de parâmetro
      */

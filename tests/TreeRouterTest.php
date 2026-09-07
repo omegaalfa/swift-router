@@ -173,6 +173,42 @@ final class TreeRouterTest extends TestCase
 
         $this->assertSame(0, $router->getStats()['cached_routes']);
     }
+
+    public function testStaticBranchFallsBackToDynamicBranchWhenItFailsLater(): void
+    {
+        $router = new SwiftRouter();
+        $router->get('/files/new/details', fn () => 'static');
+        $router->get('/files/:id/edit', fn (RequestContext $context) => $context->params['id']);
+
+        $response = $router->dispatch('GET', '/files/new/edit');
+
+        $this->assertSame('new', $response->body);
+    }
+
+    public function testAddingRouteInvalidatesPreviouslyCachedDynamicMatch(): void
+    {
+        $router = new SwiftRouter();
+        $router->get('/users/:id', fn () => 'old');
+        $this->assertSame('old', $router->dispatch('GET', '/users/42')->body);
+
+        $router->get('/users/:id', fn () => 'new');
+
+        $this->assertSame('new', $router->dispatch('GET', '/users/42')->body);
+    }
+
+    public function testAddingGlobalMiddlewareAfterFirstDispatchAffectsLaterDispatch(): void
+    {
+        $router = new SwiftRouter();
+        $router->get('/pipeline', fn (RequestContext $context) => $context->get('late', 'missing'));
+
+        $this->assertSame('missing', $router->dispatch('GET', '/pipeline')->body);
+        $router->use(static function (RequestContext $context, callable $next): Response {
+            $context->set('late', 'present');
+            return $next($context);
+        });
+
+        $this->assertSame('present', $router->dispatch('GET', '/pipeline')->body);
+    }
 }
 
 final class CallRecorder
