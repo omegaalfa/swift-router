@@ -72,7 +72,7 @@ echo is_string($response->body)
 
 `RequestContext` contém `method`, `path`, `params` e dados (`set()`, `get()`, `has()`). `Response` contém `body`, `statusCode` e `headers`; seus métodos `with*()` retornam uma cópia.
 
-O caminho é normalizado para matching: barras repetidas e trailing slash não alteram a rota. Percent-encoding é preservado nos parâmetros; sequências codificadas que tentem atravessar diretórios são rejeitadas. `findRoute()` consulta sem executar o handler.
+O caminho é normalizado para matching: barras repetidas e trailing slash não alteram a rota. Percent-encoding é decodificado durante a normalização; parâmetros chegam decodificados. Sequências codificadas que resultem em `..` ou barras invertidas são rejeitadas. `findRoute()` consulta sem executar o handler.
 
 `dispatch()` lança `RuntimeException` para rota inexistente e `InvalidArgumentException` para método inválido. `HEAD` usa a rota `GET` quando disponível e remove o corpo; `OPTIONS` pode responder com os métodos permitidos.
 
@@ -104,12 +104,15 @@ request -> normalização -> staticMap / routeCache / tree
         -> RequestContext -> middleware -> handler -> Response
 ```
 
-`staticMap` atende rotas sem parâmetros. A Tree/Trie atende matching dinâmico e `routeCache` acelera URLs repetidas. Há fallback static → dynamic quando o ramo estático não completa o matching. A adição de rotas invalida o cache dinâmico. Esses detalhes são implementação atual, não contratos para consumidores internos.
+`staticMap` atende rotas sem parâmetros. A Tree/Trie atende matching dinâmico e `routeCache` acelera URLs repetidas. Há fallback static → dynamic quando o ramo estático não completa o matching. A adição de rotas invalida o cache dinâmico. `dispatch()` possui fast-path para zero middleware, reduz trabalho na composição e mantém pipelines reutilizadas em cache interno limitado. Esses detalhes são implementação, não contrato público.
 
 ## Benchmarks
 
 - `benchmarks/router.php`: matching/dispatch em CLI.
 - `benchmarks/hot_path.php`: microbenchmark de componentes do hot path.
+- `benchmarks/competitors/`: arena isolada de comparação entre routers.
+- `benchmarks/experiments/`: experimentos internos de hipóteses de otimização.
+- `benchmarks/sanity-http/`: scripts de sanity checks HTTP.
 - `benchmarks/http/`: HTTP end-to-end com FrankenPHP classic/worker, isolamento e carga com `oha`.
 
 Microbenchmarks CLI medem operações PHP em processo e não substituem HTTP end-to-end, que inclui servidor, cliente, conexões e lifecycle HTTP. Resultados variam conforme CPU, PHP, OPcache/JIT, sistema operacional, containerização e servidor HTTP. Não há ranking publicado contra outros routers.
@@ -150,15 +153,11 @@ composer test
 composer phpstan
 ```
 
-PHPUnit cobre matching, parâmetros, métodos HTTP, grupos, middleware, trailing slash, encoding, fallback e invalidação do cache. PHPStan verifica o código-fonte. Docker/FrankenPHP é usado adicionalmente para HTTP e isolamento do worker.
+PHPUnit cobre matching, parâmetros, métodos HTTP, grupos, middleware, trailing slash, encoding, fallback e invalidação do cache. A suíte inclui regressões específicas de dispatch da pipeline, matching e route cache. PHPStan verifica o código-fonte. Docker/FrankenPHP é usado adicionalmente para HTTP e isolamento do worker.
 
-## Roadmap de benchmarking
+## Metodologia de benchmarking
 
-Comparações com outros routers poderão ser adicionadas futuramente com ambiente e metodologia publicados. Nenhum ranking é afirmado. Integrações com caches externos permanecem fora do escopo atual.
-
-## Observações do pacote
-
-O nome publicado atualmente é `omegaalfa/swiftrouter` (sem hífen), conforme `composer.json`. Descrição e keywords podem ser refinadas; `minimum-stability: dev` merece revisão antes de uma versão estável. `infection/infection` está listado como dependência de desenvolvimento, mas não há script dedicado. Essas alterações não foram feitas automaticamente para não afetar resolução de dependências.
+Benchmarks competitivos ficam isolados das dependências principais. Workloads são reproduzíveis e alterações de performance devem preservar corretude. Microbenchmarks não equivalem a performance HTTP end-to-end; resultados dependem do ambiente.
 
 ## Licença
 
