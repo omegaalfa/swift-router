@@ -35,8 +35,39 @@ class TreeRouter
      */
     private int $cacheLimit = 2048;
 
+    private int $cacheEvictions = 0;
+
+    private int $cacheCompactionInterval = 1024;
+
+    /** @var bool Temporary benchmark variant; disabled by default. */
+    private bool $clockPolicy = false;
+    /** @var array<string, bool> */
+    private array $clockReferences = [];
+    /** @var array<int, string|null> */
+    private array $clockRing = [];
+    private int $clockFill = 0;
+    private int $clockHand = 0;
+
     /** @var array<MiddlewareInterface> Middlewares globais */
     private array $globalMiddlewares = [];
+    /** @var array<string, callable> Temporary route-only compiled pipelines. */
+    private array $compiledRoutePipelines = [];
+    /** @var array<string,int> */
+    private array $pipelineAdmission = [];
+    /** @var array<string,bool> */
+    private array $pipelineReferences = [];
+    /** @var array<int,string|null> */
+    private array $pipelineRing = [];
+    private int $pipelineFill = 0;
+    private int $pipelineHand = 0;
+    private int $pipelineCapacity = 256;
+    /** @var array<int,string|null> */
+    private array $admissionRing = [];
+    /** @var array<string,bool> */
+    private array $admissionReferences = [];
+    private int $admissionHand = 0;
+    private int $admissionFill = 0;
+    private int $admissionCapacity = 256;
 
 
     /** @var int Tamanho máximo de parâmetro de rota */
@@ -50,6 +81,19 @@ class TreeRouter
     {
         $this->root = new TreeNode();
         $this->allowedNamespaces = $allowedNamespaces;
+        $this->clockPolicy = true;
+        $this->clockRing = array_fill(0, $this->cacheLimit, null);
+        $this->resetAdmissionState($this->admissionCapacity);
+    }
+
+    private function resetAdmissionState(int $capacity): void
+    {
+        $this->admissionCapacity = max(1, $capacity);
+        $this->pipelineAdmission = [];
+        $this->admissionRing = array_fill(0, $this->admissionCapacity, null);
+        $this->admissionReferences = [];
+        $this->admissionHand = 0;
+        $this->admissionFill = 0;
     }
 
 
@@ -150,6 +194,16 @@ class TreeRouter
         // Registration can change both precedence and the selected handler.
         // Previously cached dynamic matches must not outlive the route table.
         $this->routeCache = [];
+        $this->clockReferences = [];
+        $this->clockRing = array_fill(0, $this->cacheLimit, null);
+        $this->clockFill = 0;
+        $this->clockHand = 0;
+        $this->compiledRoutePipelines = [];
+        $this->resetAdmissionState($this->admissionCapacity);
+        $this->pipelineReferences = [];
+        $this->pipelineRing = array_fill(0, $this->pipelineCapacity, null);
+        $this->pipelineFill = 0;
+        $this->pipelineHand = 0;
 
         // Valida e normaliza o método
         $method = HttpMethod::fromString($method)->value;
@@ -198,7 +252,7 @@ class TreeRouter
                 continue;
             }
 
-            $currentNode->children[$segment] ??= new TreeNode();
+            $currentNode->children[$segment] ??= new TreeNode(); 
             $currentNode = $currentNode->children[$segment];
         }
 
@@ -304,13 +358,16 @@ class TreeRouter
     private function normalizePath(string $path): string
     {
         // Remove slashes duplicados
-        $path = preg_replace('#/+#', '/', $path);
+        if (str_contains($path, '//')) {
+            $path = preg_replace('#/+#', '/', $path);
+        }
 
         // Remove trailing slash (exceto root)
         $path = $path !== '/' ? rtrim($path, '/') : '/';
 
         // Detecta path traversal
-        $decoded = urldecode($path);
+        // Without percent escapes, decoding cannot introduce traversal tokens.
+        $decoded = str_contains($path, '%') ? urldecode($path) : $path;
         if (str_contains($decoded, '..') || str_contains($decoded, '\\')) {
             throw new InvalidArgumentException('Path traversal detected in route: ' . $path);
         }
@@ -350,25 +407,72 @@ class TreeRouter
 
         // Cria contexto da requisição
         $context = new RequestContext($originalMethod, $path, $route['params'], $initialData);
-
-        // Combina middlewares: globais + específicos da rota
-        $allMiddlewares = array_merge($this->globalMiddlewares, $route['middlewares']);
-
-        // Cria a cadeia de execução (middlewares + handler)
         $handler = $route['handler'];
 
-        // Constrói a cadeia de middlewares (de trás para frente)
-        $chain = static function (RequestContext $ctx) use ($handler): Response {
-            $result = $handler($ctx, new Response());
-            if ($result instanceof Response) {
-                return $result;
-            }
-            return new Response($result);
-        };
-
-        foreach (array_reverse($allMiddlewares) as $middleware) {
-            $chain = $this->wrapMiddleware($middleware, $chain);
+        // Combina middlewares: globais + específicos da rota
+        if ($this->globalMiddlewares === [] && $route['middlewares'] === []) {
+            $result = $handler($context, new Response());
+            $response = $result instanceof Response ? $result : new Response($result);
+            return $originalMethod === 'HEAD' ? $response->withBody(null) : $response;
         }
+
+        if ($this->globalMiddlewares === [] && $route['middlewares'] !== []) {
+            $pipelineKey = $searchMethod . '::' . $this->normalizePath($path);
+            $chain = $this->compiledRoutePipelines[$pipelineKey] ?? null;
+            if ($chain !== null) {
+                $this->pipelineReferences[$pipelineKey] = true;
+            } else {
+                if (!isset($this->pipelineAdmission[$pipelineKey])) {
+                    if (count($this->pipelineAdmission) >= $this->admissionCapacity) {
+                        while (true) {
+                            $victim = $this->admissionRing[$this->admissionHand % $this->admissionCapacity];
+                            $this->admissionHand = ($this->admissionHand + 1) % $this->admissionCapacity;
+                            if (!empty($this->admissionReferences[$victim])) { $this->admissionReferences[$victim] = false; continue; }
+                            unset($this->pipelineAdmission[$victim], $this->admissionReferences[$victim]); break;
+                        }
+                    }
+                    $slot = $this->admissionFill < $this->admissionCapacity ? $this->admissionFill++ : $this->admissionHand;
+                    $this->admissionRing[$slot] = $pipelineKey;
+                    $this->admissionReferences[$pipelineKey] = false;
+                }
+                if (($this->pipelineAdmission[$pipelineKey] = ($this->pipelineAdmission[$pipelineKey] ?? 0) + 1) < 3) {
+                    $chain = $this->buildMiddlewarePipeline($handler, $route['middlewares']);
+                } else {
+                $chain = $this->buildMiddlewarePipeline($handler, $route['middlewares']);
+                if ($this->pipelineFill < $this->pipelineCapacity) {
+                    $slot = $this->pipelineFill++;
+                    $this->pipelineRing[$slot] = $pipelineKey;
+                } else {
+                    while (true) {
+                        $slot = $this->pipelineHand;
+                        $victim = $this->pipelineRing[$slot];
+                        $this->pipelineHand = ($slot + 1) % $this->pipelineCapacity;
+                        if ($victim !== null && !empty($this->pipelineReferences[$victim])) { $this->pipelineReferences[$victim] = false; continue; }
+                        if ($victim !== null) { unset($this->compiledRoutePipelines[$victim], $this->pipelineReferences[$victim]); }
+                        $this->pipelineRing[$slot] = $pipelineKey; break;
+                    }
+                }
+                $this->compiledRoutePipelines[$pipelineKey] = $chain;
+                $this->pipelineReferences[$pipelineKey] = false;
+                }
+            }
+            $response = $chain($context);
+            return $originalMethod === 'HEAD' ? $response->withBody(null) : $response;
+        }
+
+        if ($this->globalMiddlewares === []) {
+            $allMiddlewares = $route['middlewares'];
+        } elseif ($route['middlewares'] === []) {
+            $allMiddlewares = $this->globalMiddlewares;
+        } else {
+        $allMiddlewares = array_merge($this->globalMiddlewares, $route['middlewares']);
+
+        }
+
+        // Cria a cadeia de execução (middlewares + handler)
+
+        // Constrói a cadeia de middlewares (de trás para frente)
+        $chain = $this->buildMiddlewarePipeline($handler, $allMiddlewares);
 
         $response = $chain($context);
 
@@ -405,42 +509,59 @@ class TreeRouter
     private function findRouteInternal(string $method, string $path): ?array
     {
 
-        // Normaliza o path usando o mesmo método de addRoute
-        $normalizedPath = $this->normalizePath($path);
+        $fullPath = $method . '::' . $path;
+        $normalized = '/' . $fullPath;
 
-        // Adiciona método ao caminho
-        $fullPath = $method . '::' . $normalizedPath;
-
-        // normalize incoming path
-        $normalized = '/' . ltrim($fullPath, '/');
-
-        // static fast map
+        // An exact registered path has already passed normalization and validation.
         if (isset($this->staticMap[$normalized])) {
             return $this->staticMap[$normalized];
+        }
+
+        $normalizedPath = $this->normalizePath($path);
+        if ($normalizedPath !== $path) {
+            $fullPath = $method . '::' . $normalizedPath;
+            $normalized = '/' . $fullPath;
+            if (isset($this->staticMap[$normalized])) {
+                return $this->staticMap[$normalized];
+            }
         }
 
         // cache
         if (isset($this->routeCache[$normalized])) {
             $entry = $this->routeCache[$normalized];
+            if ($this->clockPolicy) {
+                $this->clockReferences[$normalized] = true;
+                return $entry;
+            }
             unset($this->routeCache[$normalized]);
             $this->routeCache[$normalized] = $entry;
             return $entry;
         }
 
-        $p = ltrim($normalized, '/');
-        $parts = $p === '' ? [] : explode('/', $p);
+        $parts = explode('/', $fullPath);
         $result = $this->matchNode($this->root, $parts, 0, []);
 
         if ($result !== null) {
 
             // store in cache
-            $this->routeCache[$normalized] = $result;
-            if (count($this->routeCache) > $this->cacheLimit) {
+            if ($this->clockPolicy) {
+                $this->clockInsert($normalized, $result);
+            } else {
+                $this->routeCache[$normalized] = $result;
+            }
+            if (!$this->clockPolicy && count($this->routeCache) > $this->cacheLimit) {
                 reset($this->routeCache);
                 /** @var string|null $k */
                 $k = key($this->routeCache);
                 if ($k !== null) {
                     unset($this->routeCache[$k]);
+                }
+
+                // Rebuild occasionally to discard deleted array slots without
+                // changing the entries or their least-recently-used order.
+                if ($this->cacheLimit >= 256 && ++$this->cacheEvictions >= $this->cacheCompactionInterval) {
+                    $this->routeCache = array_slice($this->routeCache, 0, null, true);
+                    $this->cacheEvictions = 0;
                 }
             }
 
@@ -448,6 +569,38 @@ class TreeRouter
         }
 
         return null;
+    }
+
+    /** @param array{handler:callable,middlewares:array<int,MiddlewareInterface>,params:array<string,string>} $entry */
+    private function clockInsert(string $key, array $entry): void
+    {
+        if ($this->cacheLimit < 1) {
+            return;
+        }
+        if ($this->clockFill < $this->cacheLimit) {
+            $slot = $this->clockFill++;
+            $this->clockRing[$slot] = $key;
+            $this->clockReferences[$key] = false;
+            $this->routeCache[$key] = $entry;
+            return;
+        }
+
+        while (true) {
+            $slot = $this->clockHand;
+            $victim = $this->clockRing[$slot];
+            $this->clockHand = ($slot + 1) % $this->cacheLimit;
+            if ($victim !== null && !empty($this->clockReferences[$victim])) {
+                $this->clockReferences[$victim] = false;
+                continue;
+            }
+            if ($victim !== null) {
+                unset($this->routeCache[$victim], $this->clockReferences[$victim]);
+            }
+            $this->clockRing[$slot] = $key;
+            $this->clockReferences[$key] = false;
+            $this->routeCache[$key] = $entry;
+            return;
+        }
     }
 
     /**
@@ -460,37 +613,46 @@ class TreeRouter
      */
     private function matchNode(TreeNode $node, array $parts, int $index, array $params): ?array
     {
-        if ($index === count($parts)) {
-            if ($node->isEndOfRoute && $node->handler !== null) {
-                return [
-                    'handler' => $node->handler,
-                    'middlewares' => $node->middlewares,
-                    'params' => $params,
-                ];
+        $count = count($parts);
+        while ($index < $count) {
+            $segment = $parts[$index];
+            if (isset($node->children[$segment])) {
+                // Only a competing parameter branch needs a fallback frame.
+                if ($node->paramChild === null) {
+                    $node = $node->children[$segment];
+                    ++$index;
+                    continue;
+                }
+
+                $result = $this->matchNode($node->children[$segment], $parts, $index + 1, $params);
+                if ($result !== null) {
+                    return $result;
+                }
             }
 
-            return null;
-        }
-
-        $segment = $parts[$index];
-        if (isset($node->children[$segment])) {
-            $result = $this->matchNode($node->children[$segment], $parts, $index + 1, $params);
-            if ($result !== null) {
-                return $result;
+            if ($node->paramChild === null) {
+                return null;
             }
+            if (strlen($segment) > $this->maxParamLength) {
+                throw new RuntimeException(
+                    "Route parameter exceeds maximum length of {$this->maxParamLength} characters",
+                );
+            }
+
+            $params[$node->paramName ?? 'param'] = $segment;
+            $node = $node->paramChild;
+            ++$index;
         }
 
-        if ($node->paramChild === null) {
-            return null;
-        }
-        if (strlen($segment) > $this->maxParamLength) {
-            throw new RuntimeException(
-                "Route parameter exceeds maximum length of {$this->maxParamLength} characters",
-            );
+        if ($node->isEndOfRoute && $node->handler !== null) {
+            return [
+                'handler' => $node->handler,
+                'middlewares' => $node->middlewares,
+                'params' => $params,
+            ];
         }
 
-        $params[$node->paramName ?? 'param'] = $segment;
-        return $this->matchNode($node->paramChild, $parts, $index + 1, $params);
+        return null;
     }
 
     /**
@@ -551,6 +713,20 @@ class TreeRouter
         };
     }
 
+    /** @param array<int, MiddlewareInterface> $middlewares */
+    private function buildMiddlewarePipeline(callable $handler, array $middlewares): callable
+    {
+        $chain = static function (RequestContext $ctx) use ($handler): Response {
+            $result = $handler($ctx, new Response());
+            return $result instanceof Response ? $result : new Response($result);
+        };
+        foreach (array_reverse($middlewares) as $middleware) {
+            $chain = $this->wrapMiddleware($middleware, $chain);
+        }
+        return $chain;
+    }
+
+
     /**
      * Retorna estatísticas do router
      *
@@ -574,6 +750,10 @@ class TreeRouter
     public function clearCache(): void
     {
         $this->routeCache = [];
+        $this->clockReferences = [];
+        $this->clockRing = array_fill(0, $this->cacheLimit, null);
+        $this->clockFill = 0;
+        $this->clockHand = 0;
     }
 
     /**
@@ -585,6 +765,14 @@ class TreeRouter
     public function setCacheLimit(int $limit): void
     {
         $this->cacheLimit = $limit;
+        if ($this->clockPolicy) {
+            $this->routeCache = [];
+            $this->clockReferences = [];
+            $this->clockRing = array_fill(0, max(1, $limit), null);
+            $this->clockFill = 0;
+            $this->clockHand = 0;
+        }
+        $this->cacheCompactionInterval = max(256, $limit >> 1);
     }
 
     /**
