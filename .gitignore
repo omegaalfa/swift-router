@@ -37,6 +37,8 @@ Thumbs.db
 
 /phpunit.xml
 /tests/_output/
+.phpunit.result.cache
+junit.xml
 
 # Arquivos gerados
 
